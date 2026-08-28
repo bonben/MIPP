@@ -2499,6 +2499,14 @@
 	inline msk cmpeq<int64_t>(const reg v1, const reg v2) {
 		return _mm_cmpeq_epi64(_mm_castps_si128(v1), _mm_castps_si128(v2));
 	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: two 64-bit lanes are equal when both of their 32-bit halves
+	// are, so AND the 32-bit comparison with itself, halves swapped
+	template <>
+	inline msk cmpeq<int64_t>(const reg v1, const reg v2) {
+		const __m128i eq32 = _mm_cmpeq_epi32(_mm_castps_si128(v1), _mm_castps_si128(v2));
+		return _mm_and_si128(eq32, _mm_shuffle_epi32(eq32, _MM_SHUFFLE(2, 3, 0, 1)));
+	}
 #endif
 
 	template <>
@@ -2864,6 +2872,19 @@
 	inline reg mul<int32_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_mullo_epi32(_mm_castps_si128(v1), _mm_castps_si128(v2)));
 	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: rebuild the low 32 bits of the products from two widening
+	// '_mm_mul_epu32' (even and odd lanes); the signedness does not matter here
+	template <>
+	inline reg mul<int32_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1);
+		const __m128i b = _mm_castps_si128(v2);
+		const __m128i prod_even = _mm_mul_epu32(a, b);                                     // lanes 0 and 2
+		const __m128i prod_odd  = _mm_mul_epu32(_mm_srli_si128(a, 4), _mm_srli_si128(b, 4)); // lanes 1 and 3
+		return _mm_castsi128_ps(_mm_unpacklo_epi32(
+		           _mm_shuffle_epi32(prod_even, _MM_SHUFFLE(0, 0, 2, 0)),
+		           _mm_shuffle_epi32(prod_odd,  _MM_SHUFFLE(0, 0, 2, 0))));
+	}
 #endif
 
 #ifdef __SSE2__
@@ -2908,6 +2929,23 @@
 	inline reg min<uint32_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_min_epu32(_mm_castps_si128(v1), _mm_castps_si128(v2)));
 	}
+#else
+	// SSE2 fallback: compare and blend; the unsigned variant flips the sign bit
+	// first so that the signed comparison orders the operands like unsigned ones
+	template <>
+	inline reg min<int32_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		const __m128i m = _mm_cmpgt_epi32(a, b); // all ones where a > b
+		return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, b), _mm_andnot_si128(m, a)));
+	}
+
+	template <>
+	inline reg min<uint32_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		const __m128i bias = _mm_set1_epi32((int32_t)0x80000000);
+		const __m128i m = _mm_cmpgt_epi32(_mm_xor_si128(a, bias), _mm_xor_si128(b, bias));
+		return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, b), _mm_andnot_si128(m, a)));
+	}
 #endif
 
 	template <>
@@ -2920,12 +2958,27 @@
 	inline reg min<uint16_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_min_epu16(_mm_castps_si128(v1), _mm_castps_si128(v2)));
 	}
+#else
+	// SSE2 fallback: 'a - subs_epu16(a, b)' is 'min(a, b)'
+	template <>
+	inline reg min<uint16_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		return _mm_castsi128_ps(_mm_sub_epi16(a, _mm_subs_epu16(a, b)));
+	}
 #endif
 
 #ifdef __SSE4_1__
 	template <>
 	inline reg min<int8_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_min_epi8(_mm_castps_si128(v1), _mm_castps_si128(v2)));
+	}
+#else
+	// SSE2 fallback: SSE2 only has the unsigned '_mm_min_epu8', so compare and blend
+	template <>
+	inline reg min<int8_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		const __m128i m = _mm_cmpgt_epi8(a, b); // all ones where a > b
+		return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, b), _mm_andnot_si128(m, a)));
 	}
 #endif
 
@@ -2957,6 +3010,22 @@
 	inline reg max<uint32_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_max_epu32(_mm_castps_si128(v1), _mm_castps_si128(v2)));
 	}
+#else
+	// SSE2 fallback: as 'min' above, only the operand picked by the blend changes
+	template <>
+	inline reg max<int32_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		const __m128i m = _mm_cmpgt_epi32(a, b); // all ones where a > b
+		return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, a), _mm_andnot_si128(m, b)));
+	}
+
+	template <>
+	inline reg max<uint32_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		const __m128i bias = _mm_set1_epi32((int32_t)0x80000000);
+		const __m128i m = _mm_cmpgt_epi32(_mm_xor_si128(a, bias), _mm_xor_si128(b, bias));
+		return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, a), _mm_andnot_si128(m, b)));
+	}
 #endif
 
 	template <>
@@ -2969,12 +3038,27 @@
 	inline reg max<uint16_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_max_epu16(_mm_castps_si128(v1), _mm_castps_si128(v2)));
 	}
+#else
+	// SSE2 fallback: 'b + subs_epu16(a, b)' is 'max(a, b)'
+	template <>
+	inline reg max<uint16_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		return _mm_castsi128_ps(_mm_add_epi16(b, _mm_subs_epu16(a, b)));
+	}
 #endif
 
 #ifdef __SSE4_1__
 	template <>
 	inline reg max<int8_t>(const reg v1, const reg v2) {
 		return _mm_castsi128_ps(_mm_max_epi8(_mm_castps_si128(v1), _mm_castps_si128(v2)));
+	}
+#else
+	// SSE2 fallback: see 'min<int8_t>' above
+	template <>
+	inline reg max<int8_t>(const reg v1, const reg v2) {
+		const __m128i a = _mm_castps_si128(v1), b = _mm_castps_si128(v2);
+		const __m128i m = _mm_cmpgt_epi8(a, b); // all ones where a > b
+		return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, a), _mm_andnot_si128(m, b)));
 	}
 #endif
 
@@ -3173,6 +3257,43 @@
 	inline reg neg<int8_t>(const reg v1, const msk v2) {
 		return neg<int8_t>(v1, toreg<16>(v2));
 	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: '_mm_sign_epiX' is only used here as a conditional negation
+	// (the 'orb' hack above rules out the zeroing case), which is '(v1 ^ m) - m'
+	// with 'm' the sign mask of 'v2'
+	template <>
+	inline reg neg<int32_t>(const reg v1, const reg v2) {
+		const __m128i m = _mm_srai_epi32(_mm_castps_si128(v2), 31);
+		return _mm_castsi128_ps(_mm_sub_epi32(_mm_xor_si128(_mm_castps_si128(v1), m), m));
+	}
+
+	template <>
+	inline reg neg<int32_t>(const reg v1, const msk v2) {
+		return neg<int32_t>(v1, toreg<4>(v2));
+	}
+
+	template <>
+	inline reg neg<int16_t>(const reg v1, const reg v2) {
+		const __m128i m = _mm_srai_epi16(_mm_castps_si128(v2), 15);
+		return _mm_castsi128_ps(_mm_sub_epi16(_mm_xor_si128(_mm_castps_si128(v1), m), m));
+	}
+
+	template <>
+	inline reg neg<int16_t>(const reg v1, const msk v2) {
+		return neg<int16_t>(v1, toreg<8>(v2));
+	}
+
+	template <>
+	inline reg neg<int8_t>(const reg v1, const reg v2) {
+		// no arithmetic right shift on 8-bit lanes: build the sign mask with a compare
+		const __m128i m = _mm_cmpgt_epi8(_mm_setzero_si128(), _mm_castps_si128(v2));
+		return _mm_castsi128_ps(_mm_sub_epi8(_mm_xor_si128(_mm_castps_si128(v1), m), m));
+	}
+
+	template <>
+	inline reg neg<int8_t>(const reg v1, const msk v2) {
+		return neg<int8_t>(v1, toreg<16>(v2));
+	}
 #endif
 
 	// ------------------------------------------------------------------------------------------------------------ abs
@@ -3216,6 +3337,30 @@
 	template <>
 	inline reg abs<int8_t>(const reg v1) {
 		return _mm_castsi128_ps(_mm_abs_epi8(_mm_castps_si128(v1)));
+	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: 'abs(x) = (x ^ m) - m' with 'm' the sign mask of 'x'; like
+	// the SSSE3 intrinsics the minimum representable value is left unchanged
+	template <>
+	inline reg abs<int32_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		const __m128i m = _mm_srai_epi32(v, 31);
+		return _mm_castsi128_ps(_mm_sub_epi32(_mm_xor_si128(v, m), m));
+	}
+
+	template <>
+	inline reg abs<int16_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		const __m128i m = _mm_srai_epi16(v, 15);
+		return _mm_castsi128_ps(_mm_sub_epi16(_mm_xor_si128(v, m), m));
+	}
+
+	template <>
+	inline reg abs<int8_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		// no arithmetic right shift on 8-bit lanes: build the sign mask with a compare
+		const __m128i m = _mm_cmpgt_epi8(_mm_setzero_si128(), v);
+		return _mm_castsi128_ps(_mm_sub_epi8(_mm_xor_si128(v, m), m));
 	}
 #endif
 
@@ -3422,6 +3567,20 @@
 	inline reg lrot<int8_t>(const reg v1) {
 		return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_castps_si128(v1), _mm_set_epi8(0,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1)));
 	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: rotating by one lane is a fixed byte rotation, so the two
+	// halves are obtained with SSE2 byte shifts and merged (cheap, unlike 'shuff')
+	template <>
+	inline reg lrot<int16_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		return _mm_castsi128_ps(_mm_or_si128(_mm_srli_si128(v, 2), _mm_slli_si128(v, 14)));
+	}
+
+	template <>
+	inline reg lrot<int8_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		return _mm_castsi128_ps(_mm_or_si128(_mm_srli_si128(v, 1), _mm_slli_si128(v, 15)));
+	}
 #endif
 
 	// ----------------------------------------------------------------------------------------------------------- rrot
@@ -3461,6 +3620,19 @@
 	template <>
 	inline reg rrot<int8_t>(const reg v1) {
 		return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_castps_si128(v1), _mm_set_epi8(14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,15)));
+	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: as 'lrot' above with the two byte shifts swapped
+	template <>
+	inline reg rrot<int16_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		return _mm_castsi128_ps(_mm_or_si128(_mm_slli_si128(v, 2), _mm_srli_si128(v, 14)));
+	}
+
+	template <>
+	inline reg rrot<int8_t>(const reg v1) {
+		const __m128i v = _mm_castps_si128(v1);
+		return _mm_castsi128_ps(_mm_or_si128(_mm_slli_si128(v, 1), _mm_srli_si128(v, 15)));
 	}
 #endif
 
@@ -3672,6 +3844,45 @@
 	template <>
 	inline reg cvt<uint32_t,uint64_t>(const reg_2 v) {
 		return _mm_castsi128_ps(_mm_cvtepu32_epi64(_mm_castpd_si128(v)));
+	}
+#elif defined(__SSE2__)
+	// SSE2 fallback: widening the low half is an interleave of the values with
+	// their upper halves (replicated sign bits if signed, zeros if unsigned)
+	template <>
+	inline reg cvt<int8_t,int16_t>(const reg_2 v) {
+		const __m128i v_ = _mm_castpd_si128(v);
+		// no arithmetic right shift on 8-bit lanes: build the sign mask with a compare
+		return _mm_castsi128_ps(_mm_unpacklo_epi8(v_, _mm_cmpgt_epi8(_mm_setzero_si128(), v_)));
+	}
+
+	template <>
+	inline reg cvt<uint8_t,uint16_t>(const reg_2 v) {
+		const __m128i v_ = _mm_castpd_si128(v);
+		return _mm_castsi128_ps(_mm_unpacklo_epi8(v_, _mm_setzero_si128()));
+	}
+
+	template <>
+	inline reg cvt<int16_t,int32_t>(const reg_2 v) {
+		const __m128i v_ = _mm_castpd_si128(v);
+		return _mm_castsi128_ps(_mm_unpacklo_epi16(v_, _mm_srai_epi16(v_, 15)));
+	}
+
+	template <>
+	inline reg cvt<uint16_t,uint32_t>(const reg_2 v) {
+		const __m128i v_ = _mm_castpd_si128(v);
+		return _mm_castsi128_ps(_mm_unpacklo_epi16(v_, _mm_setzero_si128()));
+	}
+
+	template <>
+	inline reg cvt<int32_t,int64_t>(const reg_2 v) {
+		const __m128i v_ = _mm_castpd_si128(v);
+		return _mm_castsi128_ps(_mm_unpacklo_epi32(v_, _mm_srai_epi32(v_, 31)));
+	}
+
+	template <>
+	inline reg cvt<uint32_t,uint64_t>(const reg_2 v) {
+		const __m128i v_ = _mm_castpd_si128(v);
+		return _mm_castsi128_ps(_mm_unpacklo_epi32(v_, _mm_setzero_si128()));
 	}
 #endif
 
